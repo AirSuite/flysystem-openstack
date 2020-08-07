@@ -1,0 +1,28 @@
+{
+  "name": "airsuite/flysystem-openstack",
+  "description": "Flysystem adapter for OpenStack API",
+  "license": "MIT",
+  "authors": [
+    {
+      "name": "Falko Retter",
+      "email": "falko@air-suite.com"
+    }
+  ],
+  "require": {
+    "php": "^7",
+    "league/flysystem": "~1.0",
+    "php-opencloud/openstack": "^3.0"
+  },
+  "require-dev": {
+    "phpunit/phpunit": "^9.3",
+    "mockery/mockery": "^1.4"
+  },
+  "autoload": {
+    "psr-4": {
+      "AirSuite\\Flysystem\\OpenStack\\": "src/"
+    }
+  },
+  "config": {
+    "bin-dir": "bin"
+  }
+}

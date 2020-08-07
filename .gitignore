@@ -1,0 +1,6 @@
+vendor
+node_modules
+bin
+coverage
+coverage.xml
+*.cache

@@ -1,0 +1,21 @@
+{
+  "name": "flysystem-openstack",
+  "version": "0.0.0",
+  "author": "Falko Retter <falko@air-suite.com>",
+  "scripts": {
+    "lint:php": "prettier --write --loglevel warn --parser php",
+    "lint:php:all": "prettier --write --loglevel warn --parser php **/*.php",
+    "lint:prettier": "prettier --write --loglevel warn"
+  },
+  "gitHooks": {
+    "pre-commit": "cross-env PRE_COMMIT=true lint-staged"
+  },
+  "devDependencies": {
+    "@prettier/plugin-php": "*",
+    "cross-env": "^7.0.2",
+    "imagemin-lint-staged": "^0.4.0",
+    "lint-staged": "^10.2.11",
+    "prettier": "^2.0.5",
+    "yorkie": "^2.0.0"
+  }
+}
