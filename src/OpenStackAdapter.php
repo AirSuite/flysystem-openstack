@@ -2,6 +2,7 @@
 
 namespace AirSuite\Flysystem\OpenStack;
 
+use GuzzleHttp\Psr7\Stream;
 use League\Flysystem\Adapter\AbstractAdapter;
 use League\Flysystem\Adapter\Polyfill\NotSupportingVisibilityTrait;
 use League\Flysystem\Adapter\Polyfill\StreamedCopyTrait;
@@ -84,7 +85,7 @@ class OpenStackAdapter extends AbstractAdapter
     $object = ['name' => $location];
 
     if (is_resource($contents)) {
-      $object['stream'] = $contents;
+      $object['stream'] = new Stream($contents);
     } else {
       $object['contents'] = $contents;
     }
@@ -250,7 +251,7 @@ class OpenStackAdapter extends AbstractAdapter
       'type' => in_array('application/directory', $mimetype) ? 'dir' : 'file',
       'dirname' => Util::dirname($name),
       'path' => $name,
-      'timestamp' => strtotime($object->lastModified),
+      'timestamp' => $object->lastModified,
       'mimetype' => reset($mimetype),
       'size' => $object->contentLength,
     ];
