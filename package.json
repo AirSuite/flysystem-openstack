@@ -12,10 +12,10 @@
   },
   "devDependencies": {
     "@prettier/plugin-php": "*",
-    "cross-env": "^7.0.2",
-    "imagemin-lint-staged": "^0.4.0",
-    "lint-staged": "^10.2.11",
-    "prettier": "^2.0.5",
-    "yorkie": "^2.0.0"
+    "cross-env": "*",
+    "imagemin-lint-staged": "*",
+    "lint-staged": "*",
+    "prettier": "*",
+    "yorkie": "*"
   }
 }
