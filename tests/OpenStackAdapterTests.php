@@ -1,7 +1,6 @@
 <?php
 
 use AirSuite\Flysystem\OpenStack\OpenStackAdapter;
-use AirSuite\Flysystem\OpenStack\OpenStackAdapterException;
 use GuzzleHttp\Psr7\Stream;
 use League\Flysystem\Config;
 use Mockery\Adapter\Phpunit\MockeryTestCase;
@@ -201,22 +200,6 @@ class OpenStackAdapterTests extends MockeryTestCase
     $resource = tmpfile();
     $this->assertIsArray($adapter->updateStream('filename.ext', $resource, new Config()));
     fclose($resource);
-  }
-
-  public function testCreateDir()
-  {
-    $container = $this->getContainerMock();
-    $dataObject = $this->getDataObjectMock('dirname');
-
-    $this->expectException(OpenStackAdapterException::class);
-
-    $container
-      ->shouldReceive('uploadObject')
-      ->with('dirname', '', ['Content-Type' => 'application/directory'])
-      ->andReturn($dataObject);
-
-    $adapter = new OpenStackAdapter($container);
-    $adapter->createDir('dirname', new Config());
   }
 
   public function getterProvider()

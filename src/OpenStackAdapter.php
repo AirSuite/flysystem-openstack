@@ -127,7 +127,7 @@ class OpenStackAdapter extends AbstractAdapter
   /**
    * {@inheritdoc}
    */
-  public function delete($path)
+  public function delete($path): bool
   {
     $location = $this->applyPathPrefix($path);
     $this->container->getObject($location)->delete();
@@ -138,7 +138,7 @@ class OpenStackAdapter extends AbstractAdapter
   /**
    * {@inheritdoc}
    */
-  public function deleteDir($dirname)
+  public function deleteDir($dirname): bool
   {
     $location = $this->applyPathPrefix($dirname);
 
@@ -155,12 +155,13 @@ class OpenStackAdapter extends AbstractAdapter
   }
 
   /**
+   * OpenStack filesystems don't use directories.
+   * The filename can be segmented with slashes to emulate them, though.
    * {@inheritdoc}
-   * @throws OpenStackAdapterException
    */
   public function createDir($dirname, Config $config)
   {
-    throw OpenStackAdapterException::whenTheUserAttemptsToCreateADirectory();
+    return true;
   }
 
   /**
