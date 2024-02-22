@@ -1,6 +1,7 @@
 {
   "name": "airsuite/flysystem-openstack",
   "description": "Flysystem adapter for OpenStack API",
+  "version": "1.0.1",
   "license": "MIT",
   "authors": [
     {
