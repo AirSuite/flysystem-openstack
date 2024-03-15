@@ -4,3 +4,4 @@ bin
 coverage
 coverage.xml
 *.cache
+tests/.env

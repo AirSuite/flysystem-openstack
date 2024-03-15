@@ -4,8 +4,7 @@
  */
 
 module.exports = {
-  '*.php'                                  : ['yarn lint:prettier'],
-  '{!(package)*.json,*.code-snippets,.*rc}': ['yarn lint:prettier --parser json'],
-  'package.json'                           : ['yarn lint:prettier'],
-  '*.md'                                   : ['yarn lint:markdownlint', 'yarn lint:prettier'],
+  '*.php': ['npm run lint:prettier'],
+  '{!(package)*.json,*.code-snippets,.*rc}': ['npm run lint:json:prettier'],
+  'package.json': ['npm run lint:prettier'],
 };

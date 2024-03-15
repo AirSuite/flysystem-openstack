@@ -1,261 +1,168 @@
 <?php
 
+namespace AirSuite\Flysystem\OpenStack\Test;
+
 use AirSuite\Flysystem\OpenStack\OpenStackAdapter;
-use GuzzleHttp\Psr7\Stream;
+use Exception;
+use Generator;
+use GuzzleHttp\Client;
+use GuzzleHttp\HandlerStack;
+use League\Flysystem\AdapterTestUtilities\FilesystemAdapterTestCase;
 use League\Flysystem\Config;
-use Mockery\Adapter\Phpunit\MockeryTestCase;
+use League\Flysystem\FilesystemAdapter;
+use League\Flysystem\FilesystemException;
+use League\Flysystem\StorageAttributes;
+use OpenStack\Common\Transport\Utils as TransportUtils;
+use OpenStack\Identity\v2\Service as V2IdentityService;
 use OpenStack\ObjectStore\v1\Models\Container;
-use OpenStack\ObjectStore\v1\Models\StorageObject;
+use OpenStack\OpenStack;
+use Throwable;
 
-class OpenStackAdapterTests extends MockeryTestCase
+class OpenStackAdapterTests extends FilesystemAdapterTestCase
 {
-  public function getContainerMock($dataObject = null)
-  {
-    $container = Mockery::mock(Container::class);
-    if ($dataObject !== null) {
-      $container->shouldReceive('getObject')->andReturn($dataObject);
-    }
-    return $container;
-  }
+  protected static Container $container;
 
-  public function getDataObjectMock($filename = null)
+  /**
+   * @return void
+   * @throws Exception
+   */
+  protected static function getSwiftService(): void
   {
-    $dataObject = Mockery::mock(StorageObject::class);
-
-    if ($filename === null) {
-      // Returns a 'not found' StorageObject
-      return $dataObject;
+    if (isset(self::$container)) {
+      return;
     }
 
-    $dataObject->name = $filename;
-    $dataObject->contentType = '; plain/text';
-    $dataObject->lastModified = '2020-01-01';
-    $dataObject->contentLength = '4';
+    $baseUrl = TransportUtils::normalizeUrl(getenv('OPENSTACK_KEYSTONE'));
+    $guzzle = new Client(['base_uri' => $baseUrl, 'handler' => HandlerStack::create()]);
+    $idService = new V2IdentityService($guzzle, new RackspaceAuthApi());
 
-    return $dataObject;
-  }
+    $authUrl = getenv('OPENSTACK_KEYSTONE');
 
-  public function getStreamMock(&$resource)
-  {
-    $resource = tmpfile();
-    $stream = Mockery::mock(Stream::class);
-    $stream->shouldReceive('close');
-    $stream->shouldReceive('rewind');
-    $stream->shouldReceive('detach')->andReturn($resource);
+    if (empty($authUrl)) {
+      throw new Exception('OPENSTACK_KEYSTONE environment variable is not set');
+    }
 
-    return $stream;
-  }
+    $openstack = new OpenStack([
+      'identityService' => $idService,
+      'authUrl' => getenv('OPENSTACK_KEYSTONE'),
+      'region' => getenv('OPENSTACK_REGION'),
+      'username' => getenv('OPENSTACK_USERID'),
+      'apiKey' => getenv('OPENSTACK_PASSWORD'),
+      'tenantId' => getenv('OPENSTACK_TENANT_ID'),
+    ]);
 
-  public function testRead()
-  {
-    $dataObject = $this->getDataObjectMock('filename.ext');
-    $container = $this->getContainerMock($dataObject);
-
-    $stream = $this->getStreamMock($resource);
-
-    $dataObject->shouldReceive('download')->andReturn($stream);
-
-    $adapter = new OpenStackAdapter($container);
-    $this->assertIsArray($adapter->read('filename.ext'));
-  }
-
-  public function testReadStream()
-  {
-    $stream = $this->getStreamMock($resource);
-    $dataObject = $this->getDataObjectMock('filename.ext');
-    $container = $this->getContainerMock($dataObject);
-
-    $dataObject->shouldReceive('download')->andReturn($stream);
-
-    $adapter = new OpenStackAdapter($container);
-    $response = $adapter->readStream('filename.ext');
-
-    $this->assertIsArray($response);
-    $this->assertEquals($resource, $response['stream']);
-    fclose($resource);
-  }
-
-  public function testPrefixed()
-  {
-    $stream = $this->getStreamMock($resource);
-    $dataObject = $this->getDataObjectMock('prefix/filename.ext');
-    $container = $this->getContainerMock($dataObject);
-
-    $dataObject->shouldReceive('download')->andReturn($stream);
-
-    $adapter = new OpenStackAdapter($container, 'prefix');
-    $this->assertIsArray($adapter->read('filename.ext'));
-    fclose($resource);
-  }
-
-  public function testHas()
-  {
-    $container = $this->getContainerMock();
-    $container->shouldReceive('objectExists')->andReturn(true);
-    $adapter = new OpenStackAdapter($container);
-    $this->assertTrue($adapter->has('filename.ext'));
-  }
-
-  public function testHasFail()
-  {
-    $container = $this->getContainerMock();
-    $container
-      ->shouldReceive('objectExists')
-      ->andThrow(
-        GuzzleHttp\Exception\BadResponseException::class,
-        null,
-        Mockery::mock(Psr\Http\Message\RequestInterface::class)
-      );
-
-    $adapter = new OpenStackAdapter($container);
-    $this->assertFalse($adapter->has('filename.ext'));
-  }
-
-  public function testHasNotFound()
-  {
-    $container = $this->getContainerMock();
-    $container->shouldReceive('objectExists')->andReturn(false);
-    $adapter = new OpenStackAdapter($container);
-    $this->assertFalse($adapter->has('filename.ext'));
-  }
-
-  public function testWrite()
-  {
-    $container = $this->getContainerMock();
-    $dataObject = $this->getDataObjectMock('filename.ext');
-
-    $container->shouldReceive('uploadObject')->with('filename.ext', 'content', []);
-    $container->shouldReceive('createObject')->andReturn($dataObject);
-
-    $adapter = new OpenStackAdapter($container);
-    $this->assertIsArray($adapter->write('filename.ext', 'content', new Config()));
-  }
-
-  public function testWriteWithHeaders()
-  {
-    $container = $this->getContainerMock();
-    $dataObject = $this->getDataObjectMock('filename.ext');
-    $headers = ['custom' => 'headers'];
-
-    $container->shouldReceive('uploadObject')->with('filename.ext', 'content', $headers);
-    $container->shouldReceive('createObject')->andReturn($dataObject);
-
-    $adapter = new OpenStackAdapter($container);
-    $config = new Config(['headers' => $headers]);
-    $this->assertIsArray($adapter->write('filename.ext', 'content', $config));
-  }
-
-  public function testWriteStream()
-  {
-    $container = $this->getContainerMock();
-    $dataObject = $this->getDataObjectMock('filename.ext');
-
-    $container->shouldReceive('uploadObject');
-    $container->shouldReceive('createObject')->andReturn($dataObject);
-
-    $adapter = new OpenStackAdapter($container);
-    $config = new Config([]);
-
-    $stream = tmpfile();
-    fwrite($stream, 'something');
-
-    $this->assertIsArray($adapter->writeStream('filename.ext', $stream, $config));
-
-    fclose($stream);
-  }
-
-  public function testUpdateFail()
-  {
-    $dataObject = Mockery::mock(StorageObject::class);
-    $container = $this->getContainerMock($dataObject);
-
-    $dataObject->shouldReceive('delete')->andReturn(true);
-    $container->shouldReceive('createObject')->andReturn($dataObject);
-
-    $adapter = new OpenStackAdapter($container);
-    $this->assertFalse($adapter->update('filename.ext', 'content', new Config()));
-  }
-
-  public function testUpdate()
-  {
-    $dataObject = $this->getDataObjectMock('filename.ext');
-    $container = $this->getContainerMock($dataObject);
-
-    $dataObject->shouldReceive('delete')->andReturn(true);
-    $container->shouldReceive('createObject')->andReturn($dataObject);
-
-    $adapter = new OpenStackAdapter($container);
-    $this->assertIsArray($adapter->update('filename.ext', 'content', new Config()));
-  }
-
-  public function testUpdateStream()
-  {
-    $dataObject = $this->getDataObjectMock('filename.ext');
-    $container = $this->getContainerMock($dataObject);
-
-    $dataObject->shouldReceive('delete')->andReturn(true);
-    $container->shouldReceive('createObject')->andReturn($dataObject);
-
-    $adapter = new OpenStackAdapter($container);
-    $resource = tmpfile();
-    $this->assertIsArray($adapter->updateStream('filename.ext', $resource, new Config()));
-    fclose($resource);
-  }
-
-  public function getterProvider()
-  {
-    return [['getTimestamp'], ['getSize'], ['getMimetype']];
+    $service = $openstack->objectStoreV1(['catalogName' => 'cloudFiles']);
+    self::$container = $service->getContainer(getenv('OPENSTACK_CONTAINER'));
   }
 
   /**
-   * @dataProvider  getterProvider
+   * @return FilesystemAdapter
+   * @throws Exception
    */
-  public function testGetters($function)
+  protected static function createFilesystemAdapter(): FilesystemAdapter
   {
-    $dataObject = $this->getDataObjectMock('filename.ext');
-    $container = $this->getContainerMock($dataObject);
+    self::getSwiftService();
 
-    $container->shouldReceive('getPartialObject')->andReturn($dataObject);
-
-    $adapter = new OpenStackAdapter($container);
-    $this->assertIsArray($adapter->{$function}('filename.ext'));
+    return new OpenStackAdapter(self::$container, getenv('OPENSTACK_TEMP_URL_KEY'), 'adapter-testing');
   }
 
-  public function testDelete()
+  /**
+   * Adjusted test to account for OpenStack not having directories.
+   * @test
+   * @throws Throwable
+   */
+  public function listing_contents_shallow(): void
   {
-    $dataObject = $this->getDataObjectMock('filename.ext');
-    $container = $this->getContainerMock($dataObject);
+    $this->runScenario(function () {
+      $this->givenWeHaveAnExistingFile('some/0-path.txt', 'contents');
+      $this->givenWeHaveAnExistingFile('some/1-path.txt', 'contents');
+      $this->givenWeHaveAnExistingFile('some/2-nested/path.txt', 'contents');
 
-    $dataObject->shouldReceive('delete')->andReturn(true);
+      $listing = $this->adapter()->listContents('some', false);
+      /** @var StorageAttributes[] $items */
+      $items = iterator_to_array($listing);
 
-    $adapter = new OpenStackAdapter($container);
-    $this->assertTrue($adapter->delete('filename.ext'));
+      $this->assertInstanceOf(Generator::class, $listing);
+      $this->assertContainsOnlyInstancesOf(StorageAttributes::class, $items);
+
+      $this->assertCount(2, $items, $this->formatIncorrectListingCount($items));
+
+      usort($items, fn($a, $b) => strcmp($a->path(), $b->path()));
+
+      $this->assertEquals('some/0-path.txt', $items[0]->path());
+      $this->assertEquals('some/1-path.txt', $items[1]->path());
+    });
   }
 
-  public function testDeleteNotFound()
+  /**
+   * Adjusted test to account for OpenStack not having directories.
+   * @test
+   * @throws Throwable
+   */
+  public function listing_contents_recursive(): void
   {
-    $this->expectException(GuzzleHttp\Exception\BadResponseException::class);
+    $this->runScenario(function () {
+      $adapter = $this->adapter();
 
-    $dataObject = $this->getDataObjectMock();
-    $container = $this->getContainerMock($dataObject);
+      $adapter->write('path/file.txt', 'string', new Config());
+      $adapter->write('path/sub/file2.txt', 'string', new Config());
 
-    $dataObject
-      ->shouldReceive('delete')
-      ->andThrow(
-        GuzzleHttp\Exception\BadResponseException::class,
-        null,
-        Mockery::mock(Psr\Http\Message\RequestInterface::class)
-      );
-
-    $adapter = new OpenStackAdapter($container);
-    $this->assertFalse($adapter->delete('filename.txt'));
+      $listing = $adapter->listContents('', true);
+      /** @var StorageAttributes[] $items */
+      $items = iterator_to_array($listing);
+      $this->assertCount(2, $items, $this->formatIncorrectListingCount($items));
+    });
   }
 
-  public function testGetContainer()
+  /**
+   * @test
+   */
+  public function fetching_unknown_mime_type_of_a_file(): void
   {
-    $container = $this->getContainerMock();
-    $adapter = new OpenStackAdapter($container);
+    $this->markTestSkipped('This adapter always returns a mime-type.');
+  }
 
-    $this->assertEquals($container, $adapter->getContainer());
+  /**
+   * Meaningless for OpenStack.
+   * @return void
+   */
+  public function checking_if_a_directory_exists_after_creating_it(): void
+  {
+    $this->markTestSkipped('OpenStack does not have directories.');
+  }
+
+  /**
+   * Meaningless for OpenStack.
+   * @return void
+   */
+  public function creating_a_directory(): void
+  {
+    $this->markTestSkipped('OpenStack does not have directories.');
+  }
+
+  /**
+   * Meaningless for OpenStack.
+   * @return void
+   */
+  public function cannot_get_checksum_for_directory(): void
+  {
+    $this->markTestSkipped('OpenStack does not have directories.');
+  }
+
+  /**
+   * @return void
+   */
+  public function generating_a_public_url(): void
+  {
+    $this->markTestSkipped('This test depends on the user having configured their OpenStack container to be public.');
+  }
+
+  /**
+   * @throws FilesystemException
+   */
+  protected function tearDown(): void
+  {
+    $this->adapter()->deleteDirectory('/');
+    sleep(1);
   }
 }

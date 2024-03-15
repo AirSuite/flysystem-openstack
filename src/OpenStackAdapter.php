@@ -2,292 +2,399 @@
 
 namespace AirSuite\Flysystem\OpenStack;
 
+use DateTime;
+use DateTimeInterface;
+use Exception;
 use GuzzleHttp\Psr7\Stream;
-use League\Flysystem\Adapter\AbstractAdapter;
-use League\Flysystem\Adapter\Polyfill\NotSupportingVisibilityTrait;
-use League\Flysystem\Adapter\Polyfill\StreamedCopyTrait;
+use GuzzleHttp\Psr7\StreamWrapper;
+use League\Flysystem\ChecksumProvider;
 use League\Flysystem\Config;
-use League\Flysystem\Util;
+use League\Flysystem\FileAttributes;
+use League\Flysystem\FilesystemAdapter;
+use League\Flysystem\PathPrefixer;
+use League\Flysystem\UnableToCopyFile;
+use League\Flysystem\UnableToDeleteFile;
+use League\Flysystem\UnableToGeneratePublicUrl;
+use League\Flysystem\UnableToMoveFile;
+use League\Flysystem\UnableToProvideChecksum;
+use League\Flysystem\UnableToReadFile;
+use League\Flysystem\UnableToRetrieveMetadata;
+use League\Flysystem\UnableToSetVisibility;
+use League\Flysystem\UnableToWriteFile;
+use League\Flysystem\UrlGeneration\PublicUrlGenerator;
+use League\Flysystem\UrlGeneration\TemporaryUrlGenerator;
+use OpenStack\Common\Error\BadResponseError;
 use OpenStack\ObjectStore\v1\Models\Container;
 use OpenStack\ObjectStore\v1\Models\StorageObject;
 use Throwable;
 
-class OpenStackAdapter extends AbstractAdapter
+class OpenStackAdapter implements FilesystemAdapter, TemporaryUrlGenerator, PublicUrlGenerator, ChecksumProvider
 {
-  use StreamedCopyTrait;
-  use NotSupportingVisibilityTrait;
+  const VISIBILITY_HEADER = 'X-File-Visibility';
 
-  /**
-   * @var Container
-   */
-  protected Container $container;
-
-  /**
-   * @var string
-   */
-  protected string $prefix;
+  private Container $container;
+  private PathPrefixer $prefixer;
+  private string $tempUrlKey;
 
   /**
    * Constructor.
    *
-   * @param Container     $container
+   * @param Container $container
+   * @param string $tempUrlKey
    * @param string | null $prefix
    */
-  public function __construct(Container $container, $prefix = null)
+  public function __construct(Container $container, string $tempUrlKey, string $prefix = null)
   {
-    $this->setPathPrefix($prefix);
+    $this->prefixer = new PathPrefixer($prefix);
     $this->container = $container;
+    $this->tempUrlKey = $tempUrlKey;
   }
 
   /**
-   * Get the container.
-   *
-   * @return Container
+   * @throws BadResponseError
    */
-  public function getContainer(): Container
+  public function fileExists(string $path): bool
   {
-    return $this->container;
+    $path = $this->prefixer->prefixPath($path);
+    return $this->container->objectExists($path);
   }
 
   /**
-   * Get an object.
-   *
-   * @param string $path
-   *
-   * @return StorageObject
-   */
-  protected function getObject($path): StorageObject
-  {
-    $location = $this->applyPathPrefix($path);
-    return $this->container->getObject($location);
-  }
-
-  /**
-   * Get the metadata of an object.
-   *
-   * @param string $path
-   *
-   * @return StorageObject
-   */
-  protected function getPartialObject($path): StorageObject
-  {
-    $location = $this->applyPathPrefix($path);
-    return $this->container->getObject($location);
-  }
-
-  /**
+   * This is largely meaningless in the context of OpenStack Object storage.
+   * It's not hierarchical.
    * {@inheritdoc}
    */
-  public function write($path, $contents, Config $config)
+  public function directoryExists(string $path): bool
   {
-    $location = $this->applyPathPrefix($path);
-
-    $object = ['name' => $location];
-
-    if (is_resource($contents)) {
-      $object['stream'] = new Stream($contents);
-    } else {
-      $object['contents'] = $contents;
-    }
-
-    $response = $this->container->createObject($object);
-
-    return $this->normalizeObject($response);
+    $location = $this->prefixer->prefixPath($path);
+    $gen = $this->container->listObjects(['prefix' => $location]);
+    return !empty($gen->current());
   }
 
   /**
+   * Recursively deletes all objects with a certain prefix.
    * {@inheritdoc}
    */
-  public function update($path, $contents, Config $config)
+  public function deleteDirectory(string $path): void
   {
-    $this->delete($path);
-    return $this->write($path, $contents, $config);
-  }
-
-  /**
-   * {@inheritdoc}
-   */
-  public function rename($path, $newPath)
-  {
-    $object = $this->getObject($path);
-    $newLocation = $this->applyPathPrefix($newPath);
-    $destination = '/' . $this->container->name . '/' . ltrim($newLocation, '/');
-
-    try {
-      $object->copy(['destination' => $destination]);
-    } catch (Throwable $_) {
-      return false;
-    }
-
-    $object->delete();
-
-    return true;
-  }
-
-  /**
-   * {@inheritdoc}
-   */
-  public function delete($path): bool
-  {
-    $location = $this->applyPathPrefix($path);
-    $this->container->getObject($location)->delete();
-
-    return true;
-  }
-
-  /**
-   * {@inheritdoc}
-   */
-  public function deleteDir($dirname): bool
-  {
-    $location = $this->applyPathPrefix($dirname);
-
-    /** @var StorageObject $object */
+    $location = $this->prefixer->prefixPath($path);
     foreach ($this->container->listObjects(['prefix' => $location]) as $object) {
-      try {
-        $object->delete();
-      } catch (Throwable $_) {
-        return false;
+      $object->delete();
+    }
+  }
+
+  /**
+   * {@inheritdoc}
+   */
+  public function createDirectory(string $path, Config $config): void
+  {
+    // OpenStack doesn't have directories, so this is a no-op.
+  }
+
+  /**
+   * {@inheritdoc}
+   */
+  public function setVisibility(string $path, string $visibility): void
+  {
+    try {
+      $object = $this->getObject($path);
+      $meta = $object->getMetadata();
+      $meta[self::VISIBILITY_HEADER] = $visibility;
+      $object->resetMetadata($meta);
+    } catch (Throwable $t) {
+      throw new UnableToSetVisibility("Unable to set visibility for $path", 0, $t);
+    }
+  }
+
+  /**
+   * {@inheritdoc}
+   */
+  public function visibility(string $path): FileAttributes
+  {
+    try {
+      $object = $this->getObject($path);
+      $meta = $object->getMetadata();
+
+      if (!array_key_exists(self::VISIBILITY_HEADER, $meta)) {
+        throw new Exception(self::VISIBILITY_HEADER . ' not found in metadata.');
       }
+
+      return new FileAttributes($object->name, null, $meta[self::VISIBILITY_HEADER]);
+    } catch (Throwable $t) {
+      throw new UnableToRetrieveMetadata("Unable to retrieve visibility for $path", 0, $t);
     }
-
-    return true;
-  }
-
-  /**
-   * OpenStack filesystems don't use directories.
-   * The filename can be segmented with slashes to emulate them, though.
-   * {@inheritdoc}
-   */
-  public function createDir($dirname, Config $config)
-  {
-    return true;
   }
 
   /**
    * {@inheritdoc}
    */
-  public function writeStream($path, $resource, Config $config)
-  {
-    return $this->write($path, $resource, $config);
-  }
-
-  /**
-   * {@inheritdoc}
-   */
-  public function updateStream($path, $resource, Config $config)
-  {
-    return $this->update($path, $resource, $config);
-  }
-
-  /**
-   * {@inheritdoc}
-   */
-  public function has($path)
+  public function mimeType(string $path): FileAttributes
   {
     try {
-      $location = $this->applyPathPrefix($path);
-      $exists = $this->container->objectExists($location);
-    } catch (Throwable $e) {
-      return false;
-    }
+      $object = $this->getObject($path);
+      $object->retrieve();
 
-    return $exists;
+      if ($object->contentType === null) {
+        throw new Exception('contentType is null.');
+      }
+
+      return new FileAttributes($object->name, null, null, null, $object->contentType);
+    } catch (Throwable $t) {
+      throw new UnableToRetrieveMetadata("Unable to retrieve mime type for $path", 0, $t);
+    }
   }
 
   /**
    * {@inheritdoc}
    */
-  public function read($path)
+  public function lastModified(string $path): FileAttributes
+  {
+    try {
+      $object = $this->getObject($path);
+      $object->retrieve();
+
+      $date = $object->lastModified;
+      if (is_string($date)) {
+        $date = new DateTime($date);
+      }
+
+      return new FileAttributes($object->name, null, null, $date->getTimestamp());
+    } catch (Throwable $t) {
+      throw new UnableToRetrieveMetadata("Unable to retrieve last modified for $path", 0, $t);
+    }
+  }
+
+  /**
+   * {@inheritdoc}
+   */
+  public function fileSize(string $path): FileAttributes
+  {
+    try {
+      $object = $this->getObject($path);
+      $object->retrieve();
+
+      if ($object->contentLength === null) {
+        throw new Exception('contentLength is null.');
+      }
+
+      return new FileAttributes($object->name, $object->contentLength);
+    } catch (Throwable $t) {
+      throw new UnableToRetrieveMetadata("Unable to retrieve file size for $path", 0, $t);
+    }
+  }
+
+  /**
+   * {@inheritdoc}
+   */
+  public function move(string $source, string $destination, Config $config): void
+  {
+    try {
+      $object = $this->getObject($source);
+      $destinationLocation = $this->makeCopyDestination($destination);
+      $object->copy(['destination' => $destinationLocation]);
+      $object->delete();
+    } catch (Throwable $t) {
+      throw new UnableToMoveFile("Error moving $source to $destination", 0, $t);
+    }
+  }
+
+  /**
+   * {@inheritdoc}
+   */
+  public function copy(string $source, string $destination, Config $config): void
+  {
+    try {
+      $object = $this->getObject($source);
+      $destinationLocation = $this->makeCopyDestination($destination);
+      $object->copy(['destination' => $destinationLocation]);
+    } catch (Throwable $t) {
+      throw new UnableToCopyFile("Error copying $source to $destination", 0, $t);
+    }
+  }
+
+  /**
+   * {@inheritdoc}
+   */
+  public function write(string $path, string $contents, Config $config): void
+  {
+    $location = $this->prefixer->prefixPath($path);
+    try {
+      $visibility = $config->get('visibility');
+      $opt = ['name' => $location, 'content' => $contents];
+
+      if ($visibility) {
+        $opt['metadata'] = [self::VISIBILITY_HEADER => $visibility];
+      }
+
+      $this->container->createObject($opt);
+    } catch (Throwable $t) {
+      throw new UnableToWriteFile("Error writing to $location", 0, $t);
+    }
+  }
+
+  /**
+   * {@inheritdoc}
+   */
+  public function writeStream(string $path, $contents, Config $config): void
+  {
+    $location = $this->prefixer->prefixPath($path);
+
+    try {
+      $stream = new Stream($contents);
+      $this->container->createObject(['name' => $location, 'stream' => $stream]);
+    } catch (Throwable $t) {
+      throw new UnableToWriteFile("Error writing to $location", 0, $t);
+    }
+  }
+
+  /**
+   * {@inheritdoc}
+   */
+  public function read(string $path): string
+  {
+    try {
+      $object = $this->getObject($path);
+      return $object->download();
+    } catch (Throwable $t) {
+      throw new UnableToReadFile("Error reading $path", 0, $t);
+    }
+  }
+
+  /**
+   * {@inheritdoc}
+   */
+  public function readStream(string $path)
+  {
+    try {
+      $object = $this->getObject($path);
+      $stream = $object->download(['stream' => true]);
+
+      return StreamWrapper::getResource($stream);
+    } catch (Throwable $t) {
+      throw new UnableToReadFile("Error reading $path", 0, $t);
+    }
+  }
+
+  /**
+   * {@inheritdoc}
+   */
+  public function delete(string $path): void
+  {
+    try {
+      $object = $this->getObject($path);
+      $object->delete();
+    } catch (Throwable $t) {
+      if ($t instanceof BadResponseError && $t->getResponse()->getStatusCode() === 404) {
+        // Already gone
+        return;
+      }
+
+      throw new UnableToDeleteFile("Error deleting $path", 0, $t);
+    }
+  }
+
+  /**
+   * {@inheritdoc}
+   */
+  public function listContents(string $path, bool $deep): iterable
+  {
+    $location = $this->prefixer->prefixPath($path);
+    $objects = $this->container->listObjects(['prefix' => $location]);
+    foreach ($objects as $object) {
+      if (!$deep) {
+        $dir = dirname($object->name);
+        if ($dir !== $location) {
+          continue;
+        }
+      }
+
+      yield new FileAttributes(
+        $this->prefixer->stripPrefix($object->name),
+        $object->contentLength,
+        null,
+        $object->lastModified->getTimestamp(),
+        $object->contentType,
+      );
+    }
+  }
+
+  /**
+   * {@inheritdoc}
+   */
+  public function temporaryUrl(string $path, DateTimeInterface $expiresAt, Config $config): string
   {
     $object = $this->getObject($path);
-    $data = $this->normalizeObject($object);
-    $data['contents'] = (string) $object->download();
+    $pubUrl = $object->getPublicUri();
 
-    return $data;
+    [$base_url, $object_path] = explode('/v1/', $pubUrl);
+    $object_path = "/v1/$object_path";
+    $expires = $expiresAt->getTimestamp();
+    $hmac_body = "GET\n$expires\n$object_path";
+    $sig = hash_hmac('sha256', $hmac_body, $this->tempUrlKey);
+    return "$base_url$object_path?temp_url_sig=$sig&temp_url_expires=$expires";
   }
 
   /**
    * {@inheritdoc}
    */
-  public function readStream($path)
+  public function publicUrl(string $path, Config $config): string
   {
-    $object = $this->getObject($path);
-    $data = $this->normalizeObject($object);
-    $stream = $object->download();
-    $stream->rewind();
-
-    $data['stream'] = $stream->detach();
-
-    return $data;
-  }
-
-  /**
-   * {@inheritdoc}
-   */
-  public function listContents($directory = '', $recursive = false)
-  {
-    $response = [];
-    $marker = null;
-    $location = $this->applyPathPrefix($directory);
-
-    foreach ($this->container->listObjects(['prefix' => $location]) as $object) {
-      $response[] = $object;
+    try {
+      $object = $this->getObject($path);
+      return $object->getPublicUri();
+    } catch (Throwable $t) {
+      throw new UnableToGeneratePublicUrl("Error generating public URL for $path", 0, $t);
     }
-
-    return Util::emulateDirectories(array_map([$this, 'normalizeObject'], $response));
   }
 
-  protected function normalizeObject(StorageObject $object)
+  /**
+   * {@inheritdoc}
+   */
+  public function checksum(string $path, Config $config): string
   {
-    $name = $object->name;
-    $name = $this->removePathPrefix($name);
-    $mimetype = explode('; ', $object->contentType);
+    try {
+      $object = $this->getObject($path);
+      $object->retrieve();
 
-    if ($object->contentLength === null) {
-      return false;
+      return $object->hash;
+    } catch (Throwable $t) {
+      throw new UnableToProvideChecksum("Error retrieving checksum for $path", 0, $t);
     }
-
-    return [
-      'type' => in_array('application/directory', $mimetype) ? 'dir' : 'file',
-      'dirname' => Util::dirname($name),
-      'path' => $name,
-      'timestamp' => $object->lastModified,
-      'mimetype' => reset($mimetype),
-      'size' => $object->contentLength,
-    ];
   }
 
   /**
-   * {@inheritdoc}
+   * @param string $path
+   * @return StorageObject
    */
-  public function getMetadata($path)
+  public function getObject(string $path): StorageObject
   {
-    $object = $this->getPartialObject($path);
-    return $this->normalizeObject($object);
+    $location = $this->prefixer->prefixPath($path);
+    return $this->container->getObject($location);
   }
 
   /**
-   * {@inheritdoc}
+   * @param string $destination
+   * @return string
    */
-  public function getSize($path)
+  private function makeCopyDestination(string $destination): string
   {
-    return $this->getMetadata($path);
+    $destinationLocation = $this->prefixer->prefixPath($destination);
+    return '/' . $this->container->name . '/' . ltrim($destinationLocation, '/');
   }
 
-  /**
-   * {@inheritdoc}
-   */
-  public function getMimetype($path)
+  private function signUrl(StorageObject $object, int $getTimestamp)
   {
-    return $this->getMetadata($path);
-  }
-
-  /**
-   * {@inheritdoc}
-   */
-  public function getTimestamp($path)
-  {
-    return $this->getMetadata($path);
+    $method = 'GET';
+    $url = $argv[2];
+    $seconds = $argv[3];
+    $key = $argv[4];
+    $method = strtoupper($method);
+    [$base_url, $object_path] = split('/v1/', $url);
+    $object_path = "/v1/$object_path";
+    $seconds = (int) $seconds;
+    $expires = (int) (time() + $seconds);
+    $hmac_body = "$method\n$expires\n$object_path";
+    $sig = hash_hmac('sha256', $hmac_body, $key);
+    echo "$base_url$object_path?" . "temp_url_sig=$sig&temp_url_expires=$expires";
   }
 }

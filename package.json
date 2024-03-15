@@ -3,19 +3,20 @@
   "version": "0.0.0",
   "author": "Falko Retter <falko@air-suite.com>",
   "scripts": {
-    "lint:php": "prettier --write --loglevel warn --parser php",
+    "lint:php": "prettier --write --loglevel warn",
     "lint:php:all": "prettier --write --loglevel warn --parser php **/*.php",
-    "lint:prettier": "prettier --write --loglevel warn"
+    "lint:prettier": "prettier --write --loglevel warn",
+    "prepare": "husky install",
+    "husky:precommit": "cross-env PRE_COMMIT=true lint-staged"
   },
   "gitHooks": {
     "pre-commit": "cross-env PRE_COMMIT=true lint-staged"
   },
   "devDependencies": {
-    "@prettier/plugin-php": "*",
-    "cross-env": "*",
-    "imagemin-lint-staged": "*",
-    "lint-staged": "*",
-    "prettier": "*",
-    "yorkie": "*"
+    "@prettier/plugin-php": "^0.22.2",
+    "cross-env": "^7.0.3",
+    "lint-staged": "^15.2.2",
+    "prettier": "^3.2.5",
+    "husky": "^8.0.3"
   }
 }
